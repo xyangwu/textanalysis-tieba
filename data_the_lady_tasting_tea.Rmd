@@ -1,0 +1,685 @@
+---
+title: "自闭症贴吧数据清理"
+author: "ladytastingtea"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    pandoc_args: --number-sections
+  pdf_document: default
+---
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE,  message = FALSE, warning = FALSE, fig.fullwidth = TRUE, fig.align = "center")
+```
+
+
+```{r library_functions, echo = FALSE }
+library(openxlsx)
+library(dplyr)
+library(stringr)
+library(ggplot2)
+setwd("C:/Users/LEN/Desktop/the lady tasting tea/")
+
+
+thread <- read.xlsx("C:/Users/LEN/Desktop/the lady tasting tea/thread.xlsx")
+post <- read.xlsx("C:/Users/LEN/Desktop/the lady tasting tea/post.xlsx")
+lzl <- read.xlsx("C:/Users/LEN/Desktop/the lady tasting tea/lzl.xlsx")
+
+
+########统一发帖id的colname
+names(thread)[names(thread) == 'Id'] <- 'Thread_id'
+
+########删lzl中的“回复某人：”, add thread_id
+lzl$Content[grep("回复 ", lzl$Content)] = lzl$Content[grep("回复 ", lzl$Content)] %>%
+  str_sub(., str_locate(., "：|:")[, 1]+1, -1)
+
+
+########合并post和lzl、thread为tea
+
+
+post$Cite_author=NA
+
+##########################################
+#从post获取会员信息列表author_info
+##########################################
+
+author_info = unique(post[, c("Author", "User_id", "Level_name", "Level_id", "Sex")]) %>%
+          group_by(User_id) %>%
+          filter(Level_id == max(Level_id, na.rm = TRUE)) # filter for max membership level 
+
+
+author_info = thread %>%
+  group_by(User_id) %>%
+  summarise(threads_n = n()) %>%
+  left_join(author_info, ., 
+            by  = c("User_id" = "User_id"))
+
+
+##########################################
+#从thread获取主楼帖子信息列表data_joined  ####
+########################################## 
+data_joined = left_join(thread[, names(thread) != "Nickname"], post[, names(post) != c("Nickname")], 
+           by = c("Thread_id" = "Thread_id"))
+
+names(data_joined)[names(data_joined) == 'Author.x'] <- 'post_author'
+names(data_joined)[names(data_joined) == 'User_id.x'] <- 'post_User_id'
+names(data_joined)[names(data_joined) == 'Author.y'] <- 'uni_author'
+names(data_joined)[names(data_joined) == 'User_id.y'] <- 'uni_User_id'
+names(data_joined)[names(data_joined) == 'User_id.y'] <- 'uni_User_id'
+names(data_joined)[names(data_joined) == 'Id'] <- 'Post_id'
+
+################################
+#发言数speak  ####
+##############################
+
+###每个人楼中楼发言数lzl
+lzl_speak = lzl %>%
+  group_by(Author_id) %>%
+  summarise(lzl_speak = n()) %>%
+  ungroup(.) %>%
+  filter(Author_id %in% author_info$User_id)
+
+### numbers of posts (without creators' posts)  
+### 每个人盖楼数量post
+post_speak = post %>% 
+  group_by(User_id) %>% 
+  summarise(post_speak = n()) %>% 
+  ungroup(.) %>% 
+  filter(User_id %in% author_info$User_id)
+
+
+###每个人发言数（lzl+post, speak）
+user_speak = left_join(post_speak, lzl_speak,  
+                       by = c("User_id" = "Author_id")) %>%
+  left_join(., author_info, by = c("User_id" = "User_id"))
+
+user_speak$post_speak[is.na(user_speak$post_speak)] = 0 
+user_speak$lzl_speak[is.na(user_speak$lzl_speak)] = 0 
+
+user_speak$speak = user_speak$post_speak + user_speak$lzl_speak
+
+
+
+##############################################################3
+#给其它帖子的回复数占比comment/speak =commentper  ####
+#####################################################33
+
+###楼主在本帖的楼中楼发言
+lzl_comment = lzl %>% 
+  left_join(., post[, c("Id", "Thread_id")],
+            by = c("Post_id" = "Id")) %>%
+  left_join(., thread[, c("Thread_id", "User_id")],
+            by = c("Thread_id" = "Thread_id")) %>%
+  group_by(User_id) %>%
+  filter(User_id == Author_id) %>%
+  summarise(lzl_comment = n()) %>%
+  ungroup()
+
+###楼主在本帖的盖楼发言
+post_comment = post %>%  
+  left_join(., thread[, c("Thread_id", "User_id")],
+            by = c("Thread_id" = "Thread_id")) %>%
+  group_by(User_id.x) %>%
+  filter(User_id.x == User_id.y) %>%
+  summarise(post_comment = n()) %>%
+  ungroup()
+
+###会员给其它帖子的回复数 
+user_speak = left_join(user_speak %>% 
+                         select(User_id, speak, Level_name,Level_name,Level_id, threads_n,Sex),
+                       post_comment,by  = c("User_id" = "User_id.x")) %>%
+             left_join(., lzl_comment, 
+                       by  = c("User_id" = "User_id")) %>%
+             mutate(lzl_comment = ifelse(is.na(lzl_comment), 0, lzl_comment),
+                    post_comment = ifelse(is.na(post_comment), 0, post_comment),
+                    comment = speak - lzl_comment - post_comment)
+
+user_speak$commentper = user_speak$comment/user_speak$speak
+
+
+
+##########################################3333
+###会员在本帖的平均回复数 ####
+########################################
+
+###会员给帖子的回复数(减去1楼) 
+user_speak$selfcomment =  user_speak$lzl_comment + user_speak$post_comment
+
+###会员在本帖的平均回复数
+user_speak$selfcommentper = user_speak$selfcomment/user_speak$threads_n
+
+
+
+
+names(user_speak)[names(user_speak) == 'User_id'] <- 'uni_User_id'
+
+
+
+
+
+##########################################################
+## 会员帖子收到的回复数replied    ####
+############################################################
+
+### numbers of replys in lzl (without creators' posts) 
+### 楼中楼的回复（去除楼主的回复）
+
+lzl_rep = lzl %>% 
+  left_join(., post[, c("Id", "Thread_id")],
+            by = c("Post_id" = "Id")) %>%
+  left_join(., thread[, c("Thread_id", "User_id")],
+            by = c("Thread_id" = "Thread_id")) %>%
+  group_by(Thread_id) %>%
+  filter(User_id != Author_id) %>%
+  summarise(lzl_rep = n()) %>%
+  ungroup()
+
+### numbers of posts (without creators' posts)  
+### 跟帖数（除掉楼主自己盖的楼）
+post_rep = post %>% 
+  left_join(., thread[, c("Thread_id", "User_id")], by = c("Thread_id" = "Thread_id")) %>%
+  group_by(Thread_id) %>% 
+  filter(User_id.x != User_id.y) %>% 
+  summarise(post_rep = sum(!duplicated(Id))) %>% 
+  ungroup(.)
+
+thread_reply = thread %>%
+  select(Thread_id,User_id) %>%
+  left_join(., post_rep, by = c("Thread_id" = "Thread_id")) %>%
+  left_join(., lzl_rep, by = c("Thread_id" = "Thread_id"))
+
+### replace NAs with 0
+### 没有他人回复的帖子的回帖数赋值为0
+thread_reply[, c("post_rep", "lzl_rep")][is.na(thread_reply[, c("post_rep", "lzl_rep")])] = 0
+  
+thread_reply$reply_n = thread_reply$post_rep + thread_reply$lzl_rep
+
+
+
+
+
+###########################3
+#计算所有回复，含楼主 ####
+##################3333333
+
+### numbers of replys in lzl (without creators' posts) 
+### 楼中楼的回复（含楼主的回复）
+
+lzl_arep = lzl %>% 
+  left_join(., post[, c("Id", "Thread_id")],
+            by = c("Post_id" = "Id")) %>%
+  left_join(., thread[, c("Thread_id", "User_id")],
+            by = c("Thread_id" = "Thread_id")) %>%
+  group_by(Thread_id) %>%
+  summarise(lzl_arep = n()) %>%
+  ungroup()
+
+### numbers of posts (without creators' posts)  
+### 跟帖数（含楼主自己盖的楼）
+post_arep = post %>% 
+  left_join(., thread[, c("Thread_id", "User_id")], by = c("Thread_id" = "Thread_id")) %>%
+  group_by(Thread_id) %>% 
+  filter(Floor!=1) %>% 
+  summarise(post_arep = sum(!duplicated(Id))) %>% 
+  ungroup(.)
+
+thread_areply = thread %>%
+  select(Thread_id,User_id) %>%
+  left_join(., post_arep, by = c("Thread_id" = "Thread_id")) %>%
+  left_join(., lzl_arep, by = c("Thread_id" = "Thread_id"))
+
+### replace NAs with 0
+### 没有他人回复的帖子的回帖数赋值为0
+thread_areply[, c("post_arep", "lzl_arep")][is.na(thread_areply[, c("post_arep", "lzl_arep")])] = 0
+  
+thread_areply$areply_n = thread_areply$post_arep + thread_areply$lzl_arep
+
+
+
+
+
+### 每个人的平均回帖数replied
+
+thread_id_num = thread %>% 
+  group_by(User_id) %>% 
+  summarise(thread_id_num = n()) #同author_info 的threads_n
+
+user_speak = left_join(user_speak,thread_reply%>%
+                         group_by(User_id) %>%
+                         summarise(reply_n_all= sum(reply_n)),
+                         by = c("uni_User_id"="User_id"))%>%
+            left_join(.,thread_id_num,
+                         by = c("uni_User_id"="User_id"))%>%
+              mutate (reply_n_all = ifelse(is.na(reply_n_all), 0, reply_n_all),
+                      thread_id_num = ifelse(is.na(thread_id_num), 0, thread_id_num))
+
+user_speak$replied_n = user_speak$reply_n_all/user_speak$thread_id_num
+
+
+##########################################################
+#总表tea  ####
+##########################################################
+lzl$uni_id <-  lzl$Id 
+
+names(post)[names(post) == 'Id'] <- 'Post_id'
+
+post$uni_id <- post$Post_id
+
+names(post)[names(post) == 'User_id'] <- 'uni_User_id'
+
+
+
+
+tea<-rbind(lzl[, c("Author_id", "Post_id", "Content", "Original_Time", "Cite_author","uni_id")] %>%
+           transmute(uni_User_id = Author_id, Post_id, Content,  
+                     Time=Original_Time, Cite_author, uni_id),
+           post[, c("uni_User_id" , "Post_id", "Content", "Time","Cite_author","uni_id")])
+
+
+
+#匹配会员信息
+tea <- left_join(tea, user_speak[,c("uni_User_id","speak" ,  "Level_name","Level_id","threads_n","Sex",
+                                    "comment","commentper", "thread_id_num", "replied_n" )], by= "uni_User_id")
+
+colnames(data_joined)
+
+#匹配帖子信息
+tea = left_join(tea, data_joined[, c("Post_id","Title","Floor","post_User_id",
+                                     "Thread_id" )],  by = c("Post_id" = "Post_id"))
+tea = left_join(tea, thread_areply[, c("Thread_id","areply_n")], by= c("Thread_id"="Thread_id"))
+tea = left_join(tea, thread_reply[, c("Thread_id","reply_n")], by= c("Thread_id"="Thread_id"))
+
+tea = left_join(tea, thread[, c("Thread_id","User_id")], by= c("Thread_id"="Thread_id"))
+
+names(tea)[names(tea) == 'User_id'] <- 'thread_user_id'
+
+
+tea$Level_id2 = tea$Level_id*tea$Level_id
+
+cols <- colnames(tea)
+ colnames(tea)
+ 
+ newcols <- c( "Thread_id" ,   "thread_user_id",   "areply_n",  "reply_n" ,   "Title",  "Post_id",
+               "post_User_id", "Floor",                "uni_id",      "Content" ,"uni_User_id",   
+               "Level_name",   "Level_id" ,    "Level_id2",      "Sex" ,        "speak",    "comment", 
+               "commentper",   "replied_n" ,          "thread_id_num" , "Time" ,    "Cite_author" )
+ 
+tea <- tea[,newcols]
+
+#把信息不全的1楼发言用帖子标题代替
+tea$Content[which(nchar(tea$Content) <= 12 & tea$Floor == 1)] = 
+  tea$Title[which(nchar(tea$Content) <= 12 & tea$Floor == 1)]
+
+
+
+
+
+
+
+
+################################################
+#合并tea每个content的情感得分  ####
+################################################
+
+sentzw <- read.csv("C:/Users/LEN/Desktop/the lady tasting tea/result.csv")
+
+sentdl <- read.csv("C:/Users/LEN/Desktop/the lady tasting tea/result2.csv")
+
+tea <- tea %>%  
+    mutate(uni_id = as.numeric(uni_id))
+
+tea= left_join(tea,sentzw[, c("Id","weight")],  by = c("uni_id" = "Id"))
+tea= left_join(tea,sentdl[, c("Id","weight")],  by = c("uni_id" = "Id"))
+
+names(tea)[names(tea) == 'weight.x'] <- 'sentzw'
+names(tea)[names(tea) == 'weight.y'] <- 'sentdl'
+
+
+
+
+
+
+
+
+###################3
+#会员的平均发言情绪
+
+
+tea <- tea %>%  
+    mutate(sentzw = as.numeric(sentzw))%>%  
+    mutate(sentdl = as.numeric(sentdl))
+
+
+tea$Level_id2 <- tea$Level_id*tea$Level_id
+
+thread_avzw <- tea%>% 
+  filter(!is.na(sentzw)) %>%
+  group_by(uni_User_id) %>%
+  summarise(speak_n = n()) 
+
+thread_mod1zw <- tea%>% 
+  filter(!is.na(sentzw)) %>%
+  group_by(uni_User_id) %>%
+ summarise(sentzwpeozw = sum(sentzw)) %>%
+  mutate(avg_sentzwpeozw = sentzwpeozw/thread_avzw$speak_n)
+
+
+#dl
+thread_avdl <- tea%>% 
+  filter(!is.na(sentdl)) %>%
+  group_by(uni_User_id) %>%
+  summarise(speak_n = n()) 
+
+thread_mod1dl <- tea%>% 
+  filter(!is.na(sentdl)) %>%
+  group_by(uni_User_id) %>%
+ summarise(sentzwpeodl = sum(sentdl)) %>%
+  mutate(avg_sentzwpeodl = sentzwpeodl/thread_avdl$speak_n)
+
+user_speak$Level_id2 = user_speak$Level_id*user_speak$Level_id
+
+thread_mod11zw <- left_join(user_speak, thread_mod1zw[,c("uni_User_id","avg_sentzwpeozw")], by="uni_User_id")
+
+thread_mod11<- left_join(thread_mod11zw, thread_mod1dl[,c("uni_User_id","avg_sentzwpeodl")], by="uni_User_id")
+
+#自评占（自评+被评，即本帖帖子数）
+thread_mod11$selfcombyall <- thread_mod11$selfcommentper/(thread_mod11$replied_n+thread_mod11$selfcommentper)
+
+
+
+
+
+###############################
+#以thread为单位整理数据  ####
+##############################
+
+
+
+###################
+#楼主本帖情感 ####
+#zw
+thread_mod22zw <- tea%>% 
+  filter(!is.na(sentzw)) %>%
+  group_by(Thread_id) %>%
+  filter(uni_User_id == thread_user_id) %>%
+ summarise(sent_lzw = sum(sentzw))
+
+#dl
+thread_mod22dl <- tea%>% 
+  filter(!is.na(sentdl)) %>%
+  group_by(Thread_id) %>%
+  filter(uni_User_id == thread_user_id) %>%
+ summarise(sent_ldl = sum(sentdl))
+
+########################
+#帖子被回复情感 ####
+#zw
+   thread_mod3zw <- tea%>% 
+    filter(!is.na(sentzw)) %>%
+    group_by(Thread_id) %>%
+    filter(uni_User_id != thread_user_id) %>%
+   summarise(sent_arzw = sum(sentzw)) %>%
+   mutate(sent_rzw = sent_arzw/n())
+  
+  #dl
+  thread_mod3dl <- tea%>% 
+    filter(!is.na(sentdl)) %>%
+    group_by(Thread_id) %>%
+    filter(uni_User_id != thread_user_id) %>%
+    summarise(sent_ardl = sum(sentdl)) %>%
+   mutate(sent_rdl = sent_ardl/n())
+  
+  
+########################
+#帖子整体情感 ####
+ #zw
+  thread_mod33zw <- tea%>% 
+    filter(!is.na(sentzw)) %>%
+    group_by(Thread_id) %>%
+   summarise(sent_azw = sum(sentzw))
+  
+  #dl
+  thread_mod33dl <- tea%>% 
+    filter(!is.na(sentdl)) %>%
+    group_by(Thread_id) %>%
+   summarise(sent_adl = sum(sentdl))
+  
+
+  #主贴信息
+  teathre <- tea %>%
+             filter(Floor == 1)
+  
+  
+  #合并主贴信息与情感得分
+  thread_topic <-  read.xlsx("C:/Users/LEN/Desktop/the lady tasting tea/threadall_topic.xlsx")
+  
+  
+  thread_sent  <- left_join(teathre["Thread_id"],thread_topic, by=c("Thread_id"="document") ) %>%
+                 left_join(., thread_mod22zw)%>%
+                 left_join(., thread_mod22dl, by="Thread_id") %>%
+                 left_join(., thread_mod3zw, by="Thread_id") %>%
+                 left_join(., thread_mod3dl, by= c("Thread_id" = "Thread_id"))%>%
+                 left_join(., thread_mod33zw, by="Thread_id") %>%
+                 left_join(., thread_mod33dl, by="Thread_id")
+  
+  thread_mod <- left_join(teathre, thread_sent, by = "Thread_id") %>%
+                left_join(., thread_mod11[,c("uni_User_id","selfcombyall")], by = "uni_User_id")
+  
+  
+  
+  
+user_topic <-  read.xlsx("C:/Users/LEN/Desktop/the lady tasting tea/user_all_topic.xlsx")
+user_dif <- left_join( author_info ,user_topic, by = c( "User_id"="document" ))
+
+user_dif$Level_id2 <- user_dif$Level_id*user_dif$Level_id
+        
+
+         
+
+########################################3
+#以个人为单位看level的影响结果  ####
+##############################################
+
+
+mod0.1 <- lm(commentper ~ Level_id + Level_id2 , data = thread_mod11)
+summary(mod0.1)
+
+
+mod0.2 <- lm(selfcombyall ~ Level_id + Level_id2, data = thread_mod11)
+summary(mod0.2)
+
+mod0.3 <- lm(avg_sentzwpeozw ~ Level_id + Level_id2, data = thread_mod11)
+summary(mod0.3)
+
+mod0.4 <- lm(avg_sentzwpeodl ~ Level_id + Level_id2 , data = thread_mod11)
+summary(mod0.4)
+
+
+mod0.5 <- lm(dif ~ Level_id + Level_id2, data = user_dif)
+summary(mod0.5)
+
+
+
+#不同主题的帖子，平均情感得分差异
+
+thread_mod$dif2 <-  ifelse(thread_mod$dif>0,1,2)
+
+
+m1.1 <- mean(thread_mod$sent_azw[thread_mod$dif2==1],na.rm = TRUE) 
+m1.2 <- mean(thread_mod$sent_azw[thread_mod$dif2==2],na.rm = TRUE) 
+
+mean(thread_mod$sent_adl[thread_mod$dif2==1],na.rm = TRUE) 
+mean(thread_mod$sent_adl[thread_mod$dif2==2],na.rm = TRUE) 
+
+
+
+#########################33
+# 以thread为单位做回归 ####
+#############################
+
+###每个thread的楼主level、楼主发言情感得分、发言主题——回帖数
+
+thread_mod$sent_ldl2 <- thread_mod$sent_ldl*thread_mod$sent_ldl
+thread_mod$sent_lzw2 <- thread_mod$sent_lzw*thread_mod$sent_lzw# sent呈倒u型，但平方系数过小，接近0，放弃。
+
+
+mod1.1 <- lm(reply_n~Level_id+Level_id2+sent_lzw+dif, data= thread_mod)
+
+summary(mod1.1)
+
+mod1.2 <- lm(reply_n~Level_id+Level_id2+sent_ldl+dif, data= thread_mod)
+
+summary(mod1.2)
+
+
+
+###每个thread的楼主level、楼主发言情感得分、发言主题——回帖情感得分
+
+
+mod1.3 <- lm(sent_arzw~Level_id+Level_id2+sent_lzw+dif, data= thread_mod)
+
+summary(mod1.3)
+
+mod1.4 <- lm(sent_ardl~Level_id+Level_id2+sent_ldl+dif, data= thread_mod)
+
+summary(mod1.4)
+
+
+
+
+################
+#模型结果
+#################
+library(stargazer)
+
+
+#描述：
+
+#帖子被回复数的影响因素
+
+        
+stargazer(mod0.1, mod0.2, mod0.3,mod0.4, mod0.5, title = "表1：用户等级与互动率、发言情感指数、发言主题概率的相关关系",align = F,  type = "html",
+          digits = 2,
+          no.space = TRUE,
+          out = "regression0.doc")
+
+stargazer(mod1.1, mod1.2 , title = "表3：回帖数的影响因素",align = F, type = "html",
+          digits = 2,
+          no.space = TRUE,
+          out = "regression1.doc")
+
+stargazer(mod1.3, mod1.4 , title = "表4：回帖情感得分的影响因素",align = F, type = "html",
+          digits = 2,
+          no.space = TRUE,
+          out = "regression2.doc")
+
+
+
+
+
+
+```
+
+
+
+```{r,results='asis'}
+
+
+
+#以帖子为单位看被回复数分布 ####
+
+quantile(thread_mod$reply_n) 
+
+thread_mod %>% 
+  group_by(Level_name) %>% 
+  summarise(n = sum(!duplicated(thread_user_id))) %>% 
+  filter(!is.na(Level_name)) %>%
+  mutate(Level_name = factor(Level_name, levels = c( "初级粉丝", "中级粉丝", "高级粉丝" ,"正式会员", "核心会员", "铁杆会员", "知名人士", "人气楷模")))%>% 
+  ggplot(aes(Level_name, n)) + 
+  geom_bar(stat = "identity", width = 0.7, position = "stack", fill='#C6DBEF', color='steelblue') + 
+  geom_text(aes(label = n, y = n + 30), colour = "grey40") + 
+  ylab("频次") + 
+  xlab("用户等级") +
+  theme_classic()
+
+
+
+user_speak %>%
+  ggplot(., aes(x = Level_name, fill = Level_name, colour = Level_name)) +
+  geom_histogram(fill='#C6DBEF', color='steelblue', alpha=.8) +
+  theme_classic() +
+  labs(title = '',
+       y = NULL,
+       x = "用户等级分布") 
+
+
+#以帖子为单位看发言主题 ####
+
+
+level_dif <- left_join( thread ,author_info, by = "User_id")%>%
+             left_join(., thread_topic , by = c("Thread_id"="document") )
+
+thread_topic %>%
+  ggplot(., aes(x = dif, fill = dif, colour = dif)) +
+  geom_density(fill='#C6DBEF', color='steelblue', alpha=.8) +
+  theme_classic() +
+  labs(title = '',
+       y = NULL,
+       x = "主题概率") 
+
+
+
+
+#以会员为单位看发言主题 ####
+
+user_dif %>%
+  ggplot(., aes(x = dif, fill = dif, colour = dif)) +
+  geom_density(fill='#C6DBEF', color='steelblue', alpha=.8) +
+  theme_classic() +
+  labs(title = '',
+       y = NULL,
+       x = "主题概率(正式支持——非正式支持)") 
+
+
+
+
+gg <- user_dif %>%
+  filter(!is.na(dif)) %>%
+   mutate(level = ifelse(Level_id %in% c(0:5), "0~5", 
+                         ifelse(Level_id %in% c(6:11), "6~11", "12~13")) %>% factor(., levels = c("0~5", "6~11","12~13"))) %>% 
+  ggplot(aes(dif, fill = level)) +
+  geom_density(alpha = 0.5) +
+  theme_classic() +
+  facet_grid(.~level)+ labs(title = "", 
+       subtitle = "",
+       x = "主题概率（正式社会支持→非正式社会支持）", 
+       y = "") +
+  guides(fill=guide_legend(title="用户经验值"))
+
+
+ggsave("C:/Users/LEN/Desktop/the lady tasting tea/density.pdf", device = NULL, width = 8, height = 6)
+
+
+
+ 
+user_dif5 <- user_dif[user_dif$Level_id<=5,]%>%
+  filter(!is.na(dif))
+
+mean(user_dif5$dif)
+
+user_dif11 <- user_dif[user_dif$Level_id<=11,]%>%
+  filter(!is.na(dif))%>%
+  filter(Level_id>=6)
+
+mean(user_dif11$dif)
+
+
+user_dif13 <- user_dif[user_dif$Level_id>11,]%>%
+  filter(!is.na(dif))
+
+mean(user_dif13$dif)
+
+colnames(user_dif5)
+```
